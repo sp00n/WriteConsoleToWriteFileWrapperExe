@@ -1,4 +1,4 @@
-Visual Studio 2019 C++ project to create a .exe file which loads a WriteConsoleToWriteFileWrapper64.dll (or WriteConsoleToWriteFileWrapper32.dll) DLL file to be able to hook into WriteConsoleW calls, and redirect them to WriteFile calls instead. It will also create a file with the output if a /dlllog: argument is provided to the command.
+Visual Studio 2019 C++ project to create a .exe file which loads the [WriteConsoleToWriteFileWrapper64.dll](https://github.com/sp00n/WriteConsoleToWriteFileWrapperDll) (or WriteConsoleToWriteFileWrapper32.dll) DLL file to be able to hook into WriteConsoleW calls, and redirect them to WriteFile calls instead. It will also create a file with the output if a /dlllog: argument is provided to the command.
 
 More precisely, it is used to generate a log file for [y-cruncher](http://www.numberworld.org/y-cruncher/), which it normally doesn't.
 
