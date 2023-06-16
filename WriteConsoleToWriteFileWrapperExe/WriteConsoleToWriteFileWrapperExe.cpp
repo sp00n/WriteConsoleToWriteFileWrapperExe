@@ -12,8 +12,12 @@
 //
 //  Copyright (c) Microsoft Corporation.  All rights reserved.
 //
+#include <locale.h>
 #include <stdio.h>
+#include <filesystem>
+#include <iostream>
 #include <string>
+#include <vector>
 #include <windows.h>
 #include <detours.h>
 #pragma warning(push)
@@ -23,16 +27,54 @@
 #include <strsafe.h>
 #pragma warning(pop)
 
-//////////////////////////////////////////////////////////////////////////////
-//
-void PrintUsage(void)
+
+/**
+ * String conversions
+ * https://gist.github.com/rosasurfer/33f0beb4b10ff8a8c53d943116f8a872
+ * https://stackoverflow.com/a/3999597/973927
+ */
+
+// Convert a wide Unicode string to an UTF8 string
+std::string utf8_encode(const std::wstring& wstr)
 {
-    printf("Usage:\n"
-        "    WriteConsoleToWriteFileWrapper.exe [options] [command line]\n"
-        "Options:\n"
-        "    /v            : Verbose, display memory at start.\n"
-        "    /?            : This help screen.\n");
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
 }
+
+// Convert an UTF8 string to a wide Unicode String
+std::wstring utf8_decode(const std::string& str)
+{
+    if (str.empty()) return std::wstring();
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
+    std::wstring wstrTo(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+    return wstrTo;
+}
+
+// Convert an wide Unicode string to ANSI string
+std::string unicode2ansi(const std::wstring& wstr)
+{
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_ACP, 0, &wstr[0], -1, NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_ACP, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
+// Convert an ANSI string to a wide Unicode String
+std::wstring ansi2unicode(const std::string& str)
+{
+    if (str.empty()) return std::wstring();
+    int size_needed = MultiByteToWideChar(CP_ACP, 0, &str[0], (int)str.size(), NULL, 0);
+    std::wstring wstrTo(size_needed, 0);
+    MultiByteToWideChar(CP_ACP, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+    return wstrTo;
+}
+
+
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -255,125 +297,90 @@ BOOL GetSections(HANDLE hp, PBYTE pbBase)
     return TRUE;
 }
 
-BOOL DumpProcess(HANDLE hp)
-{
-    ULONG64 base;
-    ULONG64 next;
-
-    MEMORY_BASIC_INFORMATION mbi;
-
-    printf("  %12s %8s %8s: %3s %3s %4s %3s : %8s\n", "Address", "Offset", "Size", "Typ", "Sta", "Prot", "Ini", "Contents");
-    printf("  %12s %8s %8s: %3s %3s %4s %3s : %8s\n", "------------", "--------", "--------", "---", "---", "----", "---", "-----------------");
-
-    for (next = 0;;) {
-        base = next;
-        ZeroMemory(&mbi, sizeof(mbi));
-        if (VirtualQueryEx(hp, (PVOID)base, &mbi, sizeof(mbi)) == 0) {
-            break;
-        }
-        if ((mbi.RegionSize & 0xfff) == 0xfff) {
-            break;
-        }
-
-        next = (ULONG64)mbi.BaseAddress + mbi.RegionSize;
-
-        if (mbi.State == MEM_FREE) {
-            continue;
-        }
-
-        CHAR szType[16];
-        TypeToString(mbi.Type, szType, ARRAYSIZE(szType));
-        CHAR szState[16];
-        StateToString(mbi.State, szState, ARRAYSIZE(szState));
-        CHAR szProtect[16];
-        ProtectToString(mbi.Protect, szProtect, ARRAYSIZE(szProtect));
-        CHAR szAllocProtect[16];
-        ProtectToString(mbi.AllocationProtect, szAllocProtect, ARRAYSIZE(szAllocProtect));
-
-        CHAR szFile[MAX_PATH];
-        szFile[0] = '\0';
-        DWORD cb = 0;
-        PCHAR pszFile = szFile;
-
-        if (base == (ULONG64)mbi.AllocationBase) {
-#if 0
-            cb = pfGetMappedFileName(hp, (PVOID)mbi.AllocationBase, szFile, ARRAYSIZE(szFile));
-#endif
-            if (GetSections(hp, (PBYTE)mbi.AllocationBase)) {
-                next = base + 0x1000;
-                StringCchPrintfA(szFile, ARRAYSIZE(szFile), "%d-bit PE", Bitness);
-            }
-        }
-        if (cb > 0) {
-            for (DWORD c = 0; c < cb; c++) {
-                szFile[c] = (szFile[c] >= 'a' && szFile[c] <= 'z')
-                    ? szFile[c] - 'a' + 'A' : szFile[c];
-            }
-            szFile[cb] = '\0';
-        }
-
-        if ((pszFile = strrchr(szFile, '\\')) == NULL) {
-            pszFile = szFile;
-        }
-        else {
-            pszFile++;
-        }
-
-        PBYTE pbEnd;
-        PCHAR pszSect = FindSectionName((PBYTE)base, pbEnd);
-        if (pszSect != NULL) {
-            pszFile = pszSect;
-            if (next > (ULONG64)pbEnd) {
-                next = (ULONG64)pbEnd;
-            }
-        }
-
-        CHAR szDesc[128];
-        ZeroMemory(&szDesc, ARRAYSIZE(szDesc));
-        if (base == (ULONG64)mbi.AllocationBase) {
-            StringCchPrintfA(szDesc, ARRAYSIZE(szDesc), "  %12I64x %8I64x %8I64x: %3s %3s %4s %3s : %s",
-                (ULONG64)base,
-                (ULONG64)base - (ULONG64)mbi.AllocationBase,
-                (ULONG64)next - (ULONG64)base,
-                szType,
-                szState,
-                szProtect,
-                szAllocProtect,
-                pszFile);
-
-
-        }
-        else {
-            StringCchPrintfA(szDesc, ARRAYSIZE(szDesc), "  %12s %8I64x %8I64x: %3s %3s %4s %3s : %s",
-                "-",
-                (ULONG64)base - (ULONG64)mbi.AllocationBase,
-                (ULONG64)next - (ULONG64)base,
-                szType,
-                szState,
-                szProtect,
-                szAllocProtect,
-                pszFile);
-        }
-        printf("%s\n", szDesc);
-    }
-    return TRUE;
-}
 
 //////////////////////////////////////////////////////////////////////// main.
 //
 int CDECL main(int argc, char** argv)
 {
-    BOOLEAN fNeedHelp = FALSE;
-    BOOLEAN fVerbose = FALSE;
-    LPCSTR rpszDllsRaw[256];
-    LPCSTR rpszDllsOut[256];
-    DWORD nDlls = 0;
+    /*
+    std::cout << "LC_ALL:   " << setlocale(LC_ALL, NULL) << std::endl;
+    std::cout << "LC_CTYPE: " << setlocale(LC_CTYPE, NULL) << std::endl;
 
-    for (DWORD n = 0; n < ARRAYSIZE(rpszDllsRaw); n++) {
-        rpszDllsRaw[n] = NULL;
-        rpszDllsOut[n] = NULL;
+    char* res = setlocale(LC_ALL, ".UTF8");
+    if (res == nullptr) puts("setlocale failed");
+    else printf("New locale: %s\n", res);
+    */
+
+    SetConsoleOutputCP(CP_UTF8);    // Tells terminal to use UTF8
+    setlocale(LC_ALL, ".UTF8");     // Tells C runtime to use UTF8
+
+
+    // This is the DLL file we want to inject
+    // It needs to be in the same directory as this wrapper exe and it also needs a 32bit equivalent
+    const CHAR* dllName = "WriteConsoleToWriteFileWrapper64.dll";
+    CHAR currentExePath[MAX_PATH];
+    CHAR dllPath[1024];
+
+
+    // This is the path where the wrapper file was called from, so in most cases not the directory of the wrapper file itself
+    const std::string currentPath = std::filesystem::current_path().string();
+    printf("\n\nCurrent working directory (currentPath): %s\n", currentPath.c_str());
+
+    
+    // This returns the path of this wrapper exe file (including the exe file)
+    if (!GetModuleFileNameA(NULL, currentExePath, MAX_PATH)) {
+        printf("Cannot GetModuleFileNameA. (Error %d)\n", GetLastError());
+        return 9001;
+    }
+    printf("GetModuleFileNameA (currentExePath):     %s\n", currentExePath);
+
+    
+    // Since the DLL file is in the same place as this exe file, replace the exe file path with the dll file name
+    const std::string dllPathMerged = std::filesystem::path{ currentExePath }.replace_filename(dllName).string();
+    printf("dllPathMerged:                           %s\n", dllPathMerged.c_str());
+
+    if (!GetFullPathNameA(dllPathMerged.c_str(), ARRAYSIZE(dllPath), dllPath, NULL)) {
+        printf("Error - GetFullPathNameA: not a valid path name: %s\n", dllPathMerged.c_str());
+        return 9002;
+    }
+    printf("GetFullPathNameA (dllPath):              %s\n", dllPath);
+
+
+    if (!std::filesystem::exists(dllPath)) {
+        printf("Error - filesystem::exists: file not found: %s\n", dllPath);
+    }
+    printf("filesystem::exists successful:           %s\n", dllPath);
+
+    LPCSTR dllPathFinal;
+    DWORD c = (DWORD)strlen(dllPath) + 1;
+    PCHAR psz = new CHAR[c];
+    StringCchCopyA(psz, c, dllPath);
+    dllPathFinal = psz;
+
+    HMODULE handleDll = LoadLibraryExA(dllPathFinal, NULL, DONT_RESOLVE_DLL_REFERENCES);
+
+    if (handleDll == NULL) {
+        printf("Error - LoadLibraryExA: %s failed to load (error %ld).\n", dllPathFinal, GetLastError());
+        return 9003;
     }
 
+    printf("LoadLibraryExA succeeded for:            %s\n", dllPathFinal);
+
+
+    ExportContext ec;
+    ec.fHasOrdinal1 = FALSE;
+    ec.nExports = 0;
+    DetourEnumerateExports(handleDll, &ec, ExportCallback);
+    FreeLibrary(handleDll);
+
+    if (!ec.fHasOrdinal1) {
+        printf("WriteConsoleToWriteFileWrapper.exe: Error: %s does not export ordinal #1.\n", dllPathFinal);
+        printf("             See help entry DetourCreateProcessWithDllEx in Detours.chm.\n");
+        return 9004;
+    }
+
+
+    /*
     int arg = 1;
     for (; arg < argc && (argv[arg][0] == '-' || argv[arg][0] == '/'); arg++) {
 
@@ -383,172 +390,150 @@ int CDECL main(int argc, char** argv)
             argp++;
         if (*argp == ':' || *argp == '=')
             *argp++ = '\0';
+    }
+    */
 
-        switch (argn[0]) {
 
-        // We don't want any additional or custom DLLs to be loaded, so skip this
-        /*
-        case 'd':                                     // Set DLL Name
-        case 'D':
-            if (nDlls < ARRAYSIZE(rpszDllsRaw)) {
-                rpszDllsRaw[nDlls++] = argp;
-            }
-            else {
-                printf("WriteConsoleToWriteFileWrapper.exe: Too many DLLs.\n");
-                fNeedHelp = TRUE;
-                break;
-            }
-            break;
-        */
-        case 'v':                                     // Verbose
-        case 'V':
-            fVerbose = TRUE;
-            break;
+    // Parse the command line to get the name of exe to inject and the name of the log file
+    int numberOfArgs;
+    LPWSTR commandLine = GetCommandLineW();
+    LPWSTR* szArglist = CommandLineToArgvW(commandLine, &numberOfArgs);
+    std::vector<std::string> argumentListUtf8(numberOfArgs);
+    std::vector<const char*> argumentList(numberOfArgs);
 
-        case '?':                                     // Help
-            fNeedHelp = TRUE;
-            break;
+    wprintf(L"\n\ncommandLine: %ls\n\n", commandLine);
+    //wprintf(L"szArglist[0]:       %ls\n", szArglist[0]);
+    printf("argv[0]:            %s\n", argv[0]);
+    printf("argv[1]:            %s\n", argv[1]);
+    printf("argv[2]:            %s\n", argv[2]);
+    printf("argv[3]:            %s\n", argv[3]);
+    printf("argv[4]:            %s\n", argv[4]);
+    printf("argv[5]:            %s\n", argv[5]);
 
-        default:
-            fNeedHelp = TRUE;
-            printf("WriteConsoleToWriteFileWrapper.exe: Bad argument: %s\n", argv[arg]);
-            break;
-        }
+    // Convert the wide string argument list to utf8
+    for (int i = 0; i < numberOfArgs; i++) {
+        argumentListUtf8[i] = utf8_encode(szArglist[i]);
+        argumentList[i] = argumentListUtf8[i].c_str();
     }
 
-    if (arg >= argc) {
-        fNeedHelp = TRUE;
-    }
+    //printf("argumentListUtf8[0]: %s\n", argumentListUtf8[0]);
+    printf("argumentList[0]:    %s\n", argumentList[0]);
+    printf("argumentList[1]:    %s\n", argumentList[1]);
+    printf("argumentList[2]:    %s\n", argumentList[2]);
+    printf("argumentList[3]:    %s\n", argumentList[3]);
+    printf("argumentList[4]:    %s\n", argumentList[4]);
+    printf("argumentList[5]:    %s\n", argumentList[5]);
 
-    // We automatically load WriteConsoleToWriteFileWrapper64.dll
-    // It should automatically select the 32bit variant if needed
-    // Both DLLs need to be in the same directory
-    rpszDllsRaw[nDlls++] = "WriteConsoleToWriteFileWrapper64.dll";
+    //exit(0);
 
-    if (nDlls == 0) {
-        fNeedHelp = TRUE;
-    }
 
-    if (fNeedHelp) {
-        PrintUsage();
-        return 9001;
-    }
-
-    /////////////////////////////////////////////////////////// Validate DLLs.
-    //
-    for (DWORD n = 0; n < nDlls; n++) {
-        CHAR szDllPath[1024];
-        PCHAR pszFilePart = NULL;
-
-        if (!GetFullPathNameA(rpszDllsRaw[n], ARRAYSIZE(szDllPath), szDllPath, &pszFilePart)) {
-            printf("WriteConsoleToWriteFileWrapper.exe: Error: %s is not a valid path name..\n",
-                rpszDllsRaw[n]);
-            return 9002;
-        }
-
-        DWORD c = (DWORD)strlen(szDllPath) + 1;
-        PCHAR psz = new CHAR[c];
-        StringCchCopyA(psz, c, szDllPath);
-        rpszDllsOut[n] = psz;
-
-        HMODULE hDll = LoadLibraryExA(rpszDllsOut[n], NULL, DONT_RESOLVE_DLL_REFERENCES);
-        if (hDll == NULL) {
-            printf("WriteConsoleToWriteFileWrapper.exe: Error: %s failed to load (error %ld).\n",
-                rpszDllsOut[n],
-                GetLastError());
-            return 9003;
-        }
-
-        ExportContext ec;
-        ec.fHasOrdinal1 = FALSE;
-        ec.nExports = 0;
-        DetourEnumerateExports(hDll, &ec, ExportCallback);
-        FreeLibrary(hDll);
-
-        if (!ec.fHasOrdinal1) {
-            printf("WriteConsoleToWriteFileWrapper.exe: Error: %s does not export ordinal #1.\n",
-                rpszDllsOut[n]);
-            printf("             See help entry DetourCreateProcessWithDllEx in Detours.chm.\n");
-            return 9004;
-        }
-    }
-
-    //////////////////////////////////////////////////////////////////////////
-    STARTUPINFOA si;
-    PROCESS_INFORMATION pi;
+    STARTUPINFOA startupInfo;
+    PROCESS_INFORMATION processInfo;
     CHAR szCommand[2048];
-    CHAR szExe[1024];
-    CHAR szFullExe[1024] = "\0";
-    PCHAR pszFileExe = NULL;
+    CHAR exeToRun[MAX_PATH];
+    CHAR finalExePath[MAX_PATH] = "\0";
 
-    ZeroMemory(&si, sizeof(si));
-    ZeroMemory(&pi, sizeof(pi));
-    si.cb = sizeof(si);
+    DWORD dwFlags = CREATE_DEFAULT_ERROR_MODE | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+    ZeroMemory(&startupInfo, sizeof(startupInfo));
+    ZeroMemory(&processInfo, sizeof(processInfo));
+    startupInfo.cb = sizeof(startupInfo);
 
     szCommand[0] = L'\0';
 
-    StringCchCopyA(szExe, sizeof(szExe), argv[arg]);
+    SetLastError(0);
+
+    // Search for the exe file to inject into
+    StringCchCopyA(exeToRun, sizeof(exeToRun), argv[1]);
+    printf("exeToRun:                                %s\n", exeToRun);
+
+    SearchPathA(NULL, exeToRun, ".exe", ARRAYSIZE(finalExePath), finalExePath, NULL);
+    printf("SearchPathA (finalExePath):              %s\n", finalExePath);
+    
+
+
+    // Create the command line
+    int arg = 1;
     for (; arg < argc; arg++) {
-        if (strchr(argv[arg], ' ') != NULL || strchr(argv[arg], '\t') != NULL) {
+        if (strchr(argumentList[arg], ' ') != NULL || strchr(argumentList[arg], '\t') != NULL) {
             StringCchCatA(szCommand, sizeof(szCommand), "\"");
-            StringCchCatA(szCommand, sizeof(szCommand), argv[arg]);
+            StringCchCatA(szCommand, sizeof(szCommand), argumentList[arg]);
             StringCchCatA(szCommand, sizeof(szCommand), "\"");
         }
         else {
-            StringCchCatA(szCommand, sizeof(szCommand), argv[arg]);
+            StringCchCatA(szCommand, sizeof(szCommand), argumentList[arg]);
         }
 
         if (arg + 1 < argc) {
             StringCchCatA(szCommand, sizeof(szCommand), " ");
         }
     }
-    printf("WriteConsoleToWriteFileWrapper.exe: Starting: `%s'\n", szCommand);
-    
-    /*for (DWORD n = 0; n < nDlls; n++) {
-        printf("WriteConsoleToWriteFileWrapper.exe:   with `%s'\n", rpszDllsOut[n]);
-    }*/
-    
-    fflush(stdout);
 
-    DWORD dwFlags = CREATE_DEFAULT_ERROR_MODE | CREATE_SUSPENDED;
+    printf("\nThe new command line for Detours:\n%s\n\n", szCommand);
 
-    SetLastError(0);
-    SearchPathA(NULL, szExe, ".exe", ARRAYSIZE(szFullExe), szFullExe, &pszFileExe);
-    if (!DetourCreateProcessWithDllsA(szFullExe[0] ? szFullExe : NULL, szCommand,
+    /*
+    int wideCharCount = MultiByteToWideChar(CP_UTF8, 0, dllPathFinal, -1, NULL, 0);
+    wchar_t* dllPathWide = new wchar_t[wideCharCount];
+    MultiByteToWideChar(CP_UTF8, 0, szCommand, -1, dllPathWide, wideCharCount);
+
+    int ansiCharCount = WideCharToMultiByte(CP_ACP, 0, dllPathWide, -1, NULL, 0, NULL, NULL);
+    char* dllPathAnsi = new char[ansiCharCount];
+    WideCharToMultiByte(CP_ACP, 0, dllPathWide, -1, dllPathAnsi, ansiCharCount, NULL, NULL);
+    //*/
+
+
+    /*
+    std::string dllPathString(dllPathFinal);
+    int sizeNeededWide = MultiByteToWideChar(CP_UTF8, 0, &dllPathString[0], (int)dllPathString.size(), NULL, 0);
+    std::wstring dllPathWide(sizeNeededWide, 0);
+    MultiByteToWideChar(CP_UTF8, 0, &dllPathString[0], (int)dllPathString.size(), &dllPathWide[0], sizeNeededWide);
+    
+    std::wstring dllPathWideString(dllPathWide);
+    int sizeNeededAnsi = WideCharToMultiByte(CP_ACP, 0, &dllPathWideString[0], -1, NULL, 0, NULL, NULL);
+    std::string dllPathAnsi(sizeNeededAnsi, 0);
+    WideCharToMultiByte(CP_ACP, 0, &dllPathWideString[0], (int)dllPathWideString.size(), &dllPathAnsi[0], sizeNeededAnsi, NULL, NULL);
+    //*/
+
+    /*
+    std::wstring dllPathWide = utf8_decode(dllPathFinal);
+    std::string dllPathAnsi = unicode2ansi(dllPathWide);
+    //*/
+
+    /*
+    wprintf(L"\nThe new Wide dllPathWide: %s", dllPathWide.c_str());
+    printf("\nThe new ANSI dllPathAnsi: %s\n\n", dllPathAnsi.c_str());
+    //*/
+
+    //exit(0);
+
+    if (!DetourCreateProcessWithDllExA(finalExePath, szCommand,     // if (!DetourCreateProcessWithDllExA(finalExePath, szCommand,
         NULL, NULL, TRUE, dwFlags, NULL, NULL,
-        &si, &pi, nDlls, rpszDllsOut, NULL)) {
+        &startupInfo, &processInfo, dllPathFinal, NULL)) {
         DWORD dwError = GetLastError();
-        printf("WriteConsoleToWriteFileWrapper.exe: DetourCreateProcessWithDllEx failed: %ld\n", dwError);
-        if (dwError == ERROR_INVALID_HANDLE) {
-#if DETOURS_64BIT
-            printf("WriteConsoleToWriteFileWrapper.exe: Can't detour a 32-bit target process from a 64-bit parent process.\n");
-#else
-            printf("WriteConsoleToWriteFileWrapper.exe: Can't detour a 64-bit target process from a 32-bit parent process.\n");
-#endif
-        }
+        printf("DetourCreateProcessWithDllEx failed: %ld\n", dwError);
         ExitProcess(9009);
     }
 
-    if (fVerbose) {
-        DumpProcess(pi.hProcess);
-    }
+    printf("DetourCreateProcessWithDllEx succeeded for %s\n                                       and %s\n", finalExePath, dllPathFinal);
+    printf("WriteConsoleToWriteFileWrapper.exe:\nStarting: %s\n    with: %s\n", szCommand, dllPathFinal);
+    
+    fflush(stdout);
 
-    ResumeThread(pi.hThread);
+    //delete[] dllPathWide;
+    //delete[] dllPathAnsi;
 
-    WaitForSingleObject(pi.hProcess, INFINITE);
+
+    ResumeThread(processInfo.hThread);
+
+    WaitForSingleObject(processInfo.hProcess, INFINITE);
 
     DWORD dwResult = 0;
-    if (!GetExitCodeProcess(pi.hProcess, &dwResult)) {
+    if (!GetExitCodeProcess(processInfo.hProcess, &dwResult)) {
         printf("WriteConsoleToWriteFileWrapper.exe: GetExitCodeProcess failed: %ld\n", GetLastError());
         return 9010;
     }
+    dllPathFinal = NULL;
+    delete dllPathFinal;
 
-    for (DWORD n = 0; n < nDlls; n++) {
-        if (rpszDllsOut[n] != NULL) {
-            delete[] rpszDllsOut[n];
-            rpszDllsOut[n] = NULL;
-        }
-    }
 
     return dwResult;
 }

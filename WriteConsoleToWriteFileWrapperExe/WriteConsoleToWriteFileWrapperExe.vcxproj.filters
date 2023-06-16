@@ -32,4 +32,9 @@
   <ItemGroup>
     <None Include="packages.config" />
   </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="WriteConsoleToWriteFileWrapperExe.manifest">
+      <Filter>Source Files</Filter>
+    </Manifest>
+  </ItemGroup>
 </Project>
